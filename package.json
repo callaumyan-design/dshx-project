@@ -1,7 +1,7 @@
 {
   "name": "dshx-project",
-  "version": "1.0.0",
-  "description": "Show and open the session's real project directory from the session header, plus a set_project tool so the model can record it. Session cwd is immutable, so the mapping lives in this plugin's own durable store instead.",
+  "version": "2.1.0",
+  "description": "Open the session's real project in the file manager from the session header. The project is the user's pick, the model's set_project record, or inferred from the session log's tool calls.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -27,7 +27,8 @@
   "files": [
     "client.js",
     "cordis.patch.yml",
-    "index.js"
+    "index.js",
+    "infer.js"
   ],
   "dsh": {
     "bundle": {

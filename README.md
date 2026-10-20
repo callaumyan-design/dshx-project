@@ -1,61 +1,57 @@
 # dshx-project
 
-在会话标题栏显示**本会话真正在做的项目**，一键在资源管理器里打开它。
+> Makes the session header's built-in "Open In" button open the conversation's **real project folder** instead of the workspace root. The project is your pick, the model's `set_project` record, or inferred from the session log.
+
+**不加任何按钮**：直接接管标题栏自带的「Open In」图标。点它（资源管理器、VS Code 等任意应用），打开的是这个对话**真正在做的项目**，而不是工作区根目录。
 
 ## 为什么需要它
 
-DSH 自带「Open In...」按钮打开的是会话的 `cwd`。而 `cwd` 是**会话创建时写死的 immutable 元数据**：
+会话的 `cwd` 是创建时写死的（immutable），DSH 没有任何修改它的 API。如果你习惯从工作区根目录开对话，自带的「Open In...」就永远只能打开根目录。
 
-```ts
-// dsh-session/lib/types/types.d.ts
-export interface SessionHeader {
-    /** Absolute working directory the session was created in (if any). */
-    readonly cwd?: string;
-```
+本插件自己判断真实项目，**不改会话日志**；插件没加载时一切照旧。
 
-我在 0.2.0-rc.2 的运行时里搜过 `setCwd|updateHeader|patchHeader|updateMeta`——**零结果**，
-没有任何修改 API。如果你的会话都建在工作区根目录（常见情况），那个按钮永远只打开根目录。
+## 项目怎么确定（优先级从高到低）
 
-从日志里反推项目也不可行：实测覆盖率约 3%（267 个日志里只有 9 个提到完整子路径）。
-
-**所以本插件不去改那个 immutable 字段**，而是自己维护一份 `sessionId -> 项目路径` 的映射。
-它是纯展示性的：插件没加载时会话照常打开，自带按钮照常工作，会话日志不受任何影响。
-
-## 装了什么
-
-| 位置 | 内容 |
+| 来源 | 说明 |
 |---|---|
-| 标题栏 | 一个「项目」控件，显示项目文件夹名；点开是目录菜单（当前项目 / 工作区目录 / 忘记） |
-| AI 工具 | `set_project(path)` —— 模型可以自己把当前项目记下来 |
-| 路由 | `/dshx-project/{state,set,clear,open}`，只接受同源请求 |
+| 你手选 | 通过 `POST /dshx-project/set` 路由（目前无界面） |
+| AI 记录 | 常驻系统提示要求 AI 一确定项目就调用 `set_project` 工具 |
+| 自动识别 | 读会话日志里所有工具调用涉及的路径，按项目目录打分（写入权重高，越近越重） |
+| 兜底 | 会话 cwd（还没识别出项目时） |
 
-映射存在 `~/.dsh/dshx-project/projects.json`（原子写：先写 `.tmp-<pid>` 再 rename）。
+- **历史会话**：不需要任何登记，打开就自动识别。作者本机实测 343 个会话里约 73% 能识别出项目，其余基本是没调用过工具的纯聊天。
+- **新对话**：一开始打开根目录；AI 开始动某个项目的文件（或调用了 `set_project`）后，下次点图标就会打开那个项目。
+- **项目搬过家也认得**：老日志里的 `<root>\my-app` 会按目录名对到现在的 `<root>\projects\my-app`。
+- 你手选的永远优先，AI 不能覆盖。
 
-## 用法
+## 文件放置规则（同一段系统提示里下发）
 
-- **手动**：点标题栏的「项目」→ 从菜单里选一个目录 → 记下并可直接打开。
-- **AI 自动**：直接跟模型说「这个会话在做 D:\work\my-app」，它会调 `set_project`。
-  也可以让它在发现真实项目根和工作区根不同时自己记录下来。
-- **打开**：点控件本体 = 打开当前记录的项目；菜单里选别的目录 = 改记录。
+- AI 不在工作区根目录直接写文件；
+- 做已有项目 → 文件放进该项目；
+- 其他产出 → 先建 `outputs\<YYYY-MM-DD>-<英文短名>\`，本对话所有文件放进去，并用 `set_project` 登记，这样标题栏按钮打开的就是这个文件夹；
+- 临时文件 → `.tmp\`，用完删除。
 
-## 几个设计取舍
+规则文本在 `index.js` 的 `PROMPT_RULE`，可按需修改。
 
-- **路径必须在已知工作区内。** `set` / `open` 路由页面可达，不设限就等于让浏览器
-  能打开机器上任意目录。工作区根来自 `~/.dsh/storages/workspace.json`（产品自己的
-  事实来源），与会话 `cwd` 取并集。
-- **`Agent.id` 就是 session id。** 工具执行时没有 sessionId 参数，是从 `exec.agent.id` 拿的
-  （`dsh-agent` 的 `types.d.ts`：`Session identity`）。没有 agent 上下文时明确报错，不猜。
-- **只依赖 React。** 下拉菜单是自己实现的，没有 require `@deepseek-ai/dsh-client-ui-primitives`
-  ——那个包装在 app.asar 的运行时 payload 里、磁盘上读不到，无法在开发时核对它的 props 契约。
-  自带按钮的 `Menu` 组件引用方式可查，但我不想依赖一个没法验证的 API。
-- **候选目录走两层。** 项目有的在一层下（`projects/my-app`），有的直接在根下
-  （`my-tool`），只走一层会漏掉一半。
+## 识别规则
 
-## 测试
+- 只认工作区（`~/.dsh/storages/workspace.json`）内的目录。
+- 「容器目录」本身不算项目，往下取一层：`projects`、`outputs`、`docs`、`dsh`、`dsh/dshx-plugins`、`dsh/skills`、`dsh/tools`（在 `infer.js` 的 `CONTAINERS` 修改）。
+- 忽略 `archive`、`.tmp`、`tmp`、`node_modules`、`.dsh`、`.agents` 等（`NOISE`）以及所有点开头的目录。
+- 证据不足（总分 < 2）时不下结论。
+- 日志只读、增量解码（只解新增的 zstd 帧），每个会话缓存偏移量。
 
-开发时用一组 11 项的 host 测试（假 ctx 驱动真实模块）覆盖：
-空状态、越界拒绝、缺失目录、相对路径、正常记录、状态回读、按记录打开、无记录打开、
-清除、AI 工具的三种情形（有效/越界/无 agent）、方法守卫（405）、以及 render 输出。
+## 实现
+
+- 前端在标题栏放一个隐藏标记记下会话 id，拦截自带按钮发出的 `open-in-app/open` 请求，**只在路径等于该会话 cwd 时**换成真实项目；查询失败或识别不出时原样放行。
+- 记录存在 `~/.dsh/dshx-project/projects.json`（串行化原子写）。
+
+| 文件 | 内容 |
+|---|---|
+| `index.js` | 路由 `/dshx-project/{state,set,clear,open}`、`set_project` 工具、系统提示规则 |
+| `infer.js` | 会话日志解析与项目打分 |
+| `client.js` | 接管自带 Open In 图标的请求（无可见 UI） |
+| `test.mjs` / `client-test.mjs` | 19 项 host 测试 / 8 项 client 测试：`node test.mjs`、`node client-test.mjs` |
 
 ## 安装
 
@@ -67,6 +63,15 @@ dsh plugin --profile desktop add github:callaumyan-design/dshx-project
 ```
 
 安装后重启 DSH。卸载：`dsh plugin --profile <profile> remove dshx-project`。
+
+## 更新日志
+
+- **2.1.0** — 不再单独加按钮，改为接管标题栏自带的「Open In」图标；新增从会话日志自动识别项目（含项目搬家后的重定位）；新增文件放置规则提示。
+- **1.0.0** — 首个公开版本：标题栏「项目」控件 + `set_project` 工具。
+
+## 兼容性
+
+在 DeepSeek Harness 0.2.0-rc.2（desktop / web profile）上开发和使用。纯 JavaScript，无构建步骤，无安装脚本。
 
 ## License
 
